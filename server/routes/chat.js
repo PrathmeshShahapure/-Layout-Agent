@@ -17,43 +17,91 @@ const groq = new Groq({
 const SYSTEM_PROMPT = `
 You are a layout transformation AI.
 
-Your job is to return JSON updates for layout nodes.
-
-CANVAS RULES:
-- The artboard defines the canvas (width × height).
-- Every node has absolute (x, y, width, height) AND normalized
-  (nx, ny, nw, nh) coordinates relative to the artboard.
-- When you change the artboard size, recompute absolute values
-  using normalized values to preserve layout proportions.
-
-SEMANTIC ROLES (infer from name + content):
-- "Background" → full-canvas image
-- "Product" → main product image (usually large, center)
-- "headline" → largest text, often the main message
-- "offer badge" / "discount" → smaller circular elements with %
-- "CTA" / "offer" → "Limited time offer"-style text
+Your job is to analyze the user's instruction and return JSON describing:
+1. what changes were made
+2. which node was targeted
+3. which properties were updated
 
 The layout contains:
 - text nodes
 - image nodes
 - shape nodes
-- positions
-- sizes
+- an artboard node
 
-Rules:
-- Return ONLY valid JSON
-- Use normalized values:
+Every node has:
+- absolute values:
+  x y width height
+- normalized values:
   nx ny nw nh
-- Values must stay between 0 and 1
+- visual styles inside:
+  style.visual
 
-Examples:
+IMPORTANT RULES:
+- Return ONLY valid JSON
+- Do NOT return markdown
+- Do NOT explain outside JSON
+- Do NOT use \`\`\`
+- Return ONLY ONE JSON object
+- Never return multiple JSON objects
+- Never return arrays
+- Handle only ONE layout transformation per request
+
+TARGETING RULES:
+- Always use EXACT node ids from the layout
+- Never use generic names like:
+  "headline"
+  "product"
+  "offer"
+
+NORMALIZED VALUE RULES:
+- nx ny nw nh must stay between 0 and 1
+- Use normalized values for:
+  position and size updates
+
+TEXT RULES:
+- Use fontSize for text resizing
+- Use textColor for text color updates
+
+COLOR RULES:
+- Colors must use hex values
+- Example:
+  "#ff0000"
+
+ARTBOARD RULES:
+- The artboard is also a node
+- To resize canvas, update:
+  width and height
+
+SUPPORTED UPDATE TYPES:
+- nx
+- ny
+- nw
+- nh
+- fontSize
+- textColor
+- backgroundColor
+- width
+- height
+
+RESPONSE FORMAT:
+
+{
+  "message": "Short explanation of changes",
+  "target": "exact_node_id",
+  "updates": {
+    "property": "value"
+  }
+}
+
+EXAMPLES:
 
 User:
 "Move headline to top"
 
 Response:
 {
-  "target": "headline",
+  "message": "Moved the headline closer to the top of the canvas.",
+  "target": "text_1778486306230_8",
   "updates": {
     "ny": 0.05
   }
@@ -64,24 +112,39 @@ User:
 
 Response:
 {
-  "target": "headline",
+  "message": "Reduced the headline font size from 72px to 48px.",
+  "target": "text_1778486306230_8",
   "updates": {
-   "fontSize": 48
+    "fontSize": 48
   }
 }
 
 User:
-"Move product slightly right"
+"Change headline color to red"
 
 Response:
 {
-  "target": "product",
+  "message": "Changed the headline text color to red.",
+  "target": "text_1778486306230_8",
   "updates": {
-    "nx": 0.3
+    "textColor": "#ff0000"
   }
 }
 
-Return ONLY JSON.
+User:
+"Convert to Instagram story"
+
+Response:
+{
+  "message": "Resized the canvas to Instagram story format (1080×1920).",
+  "target": "artboard_1778485662755_3",
+  "updates": {
+    "width": 1080,
+    "height": 1920
+  }
+}
+
+Return ONLY valid JSON.
 `;
 
 router.post("/", async (req, res) => {
@@ -120,7 +183,40 @@ router.post("/", async (req, res) => {
       .replace(/```/g, "")
       .trim();
     
-    const action = JSON.parse(cleanedReply);
+      let action;
+
+      try {
+      
+        action = JSON.parse(cleanedReply);
+      
+      } catch (error) {
+
+        console.log(error);
+      
+        // HANDLE RATE LIMITS
+      
+        if (
+          error.message.includes(
+            "Rate limit"
+          )
+        ) {
+      
+          return res.status(429).json({
+            error: true,
+            message:
+              "AI rate limit reached. Please try again in 15 minutes or try tomorrow.",
+          });
+        }
+      
+        // HANDLE GENERAL ERRORS
+      
+        return res.status(500).json({
+          error: true,
+          message:
+            error.message ||
+            "Something went wrong.",
+        });
+      }
     
     const updatedLayout =
       structuredClone(layout);
@@ -164,6 +260,16 @@ router.post("/", async (req, res) => {
         node.style.visual.fontSize =
           action.updates.fontSize;
       }
+
+      if (action.updates.textColor) {
+        node.style.visual.color.hex =
+        action.updates.textColor;
+      }
+      
+      if (action.updates.backgroundColor) {
+        node.style.visual.fill =
+        action.updates.backgroundColor;
+      }
     }
     
     res.json({
@@ -174,9 +280,12 @@ router.post("/", async (req, res) => {
   } catch (error) {
 
     console.log(error);
-
-    res.json({
-      reply: error.message,
+  
+    return res.status(500).json({
+      error: true,
+      message:
+        error.message ||
+        "Something went wrong.",
     });
   }
 });
